@@ -1,4 +1,4 @@
-load("@io_bazel_rules_go//go:def.bzl", "GoSource", "GoPath", "go_context", "go_path")
+load("@io_bazel_rules_go//go:def.bzl", "GoPath", "GoSource", "go_context", "go_path")
 
 EntGenerateInfo = provider(
     "Ent schema generation info",
@@ -33,6 +33,9 @@ def _ent_generate_impl(ctx):
         "runtime/runtime",
     ]:
         files.append(f + ".go")
+
+    for f in ctx.attr.extra_outputs:
+        files.append(f)
 
     # TODO: get entity names from schema.
     for entity in ctx.attr.entities:
@@ -75,12 +78,12 @@ def _ent_generate_impl(ctx):
         exec {generate} "$@"
         """.format(
             gobin = go.go.dirname,
-            generate = ctx.executable._generate.path,
+            generate = ctx.executable.generate_tool.path,
         ),
         arguments = [schema_path, schema_package, target_path, target_package],
         # TODO: check rules_go again what tools are really needed here.
-        tools = [ctx.executable._generate] + go.sdk_tools + go.sdk_files,
-        inputs = depset(ctx.files.gomod + schema_srcs),
+        tools = [ctx.executable.generate_tool] + go.sdk_tools + go.sdk_files,
+        inputs = depset(ctx.files.gomod + ctx.files.data + schema_srcs),
         outputs = outputs,
         env = {"GOROOT_FINAL": "GOROOT"},
     )
@@ -107,7 +110,7 @@ _ent_generate = rule(
         "schema": attr.label(
             mandatory = True,
         ),
-        "_generate": attr.label(
+        "generate_tool": attr.label(
             executable = True,
             default = Label("@com_github_cloneable_rules_ent//cmd/generate"),
             cfg = "exec",
@@ -117,6 +120,7 @@ _ent_generate = rule(
         ),
         "gopath": attr.label(),
         "importpath": attr.string(mandatory = True),
+        "data": attr.label_list(),
         "deps": attr.label_list(
             default = [
                 "@io_entgo_ent//:go_default_library",
@@ -130,6 +134,7 @@ _ent_generate = rule(
         "gomod": attr.label(),
         # TODO: remove this.
         "entities": attr.string_list(mandatory = True),
+        "extra_outputs": attr.string_list(),
     },
     toolchains = ["@io_bazel_rules_go//go:toolchain"],
 )
@@ -177,7 +182,17 @@ _ent_library = rule(
     toolchains = ["@io_bazel_rules_go//go:toolchain"],
 )
 
-def go_ent_library(name, gomod, entities, schema, visibility, importpath):
+def go_ent_library(
+        name,
+        gomod,
+        entities,
+        schema,
+        visibility,
+        importpath,
+        data = [],
+        extra_deps = [],
+        extra_outputs = [],
+        generate_tool = "@com_github_cloneable_rules_ent//cmd/generate"):
     # TODO: handle potential name conflicts.
     go_path(
         name = name + "_gopath",
@@ -190,6 +205,9 @@ def go_ent_library(name, gomod, entities, schema, visibility, importpath):
         gomod = gomod,
         importpath = importpath,
         gopath = ":" + name + "_gopath",
+        data = data,
+        generate_tool = generate_tool,
+        extra_outputs = extra_outputs,
     )
 
     default_deps = [
@@ -229,7 +247,7 @@ def go_ent_library(name, gomod, entities, schema, visibility, importpath):
         deps = [
             ":" + name + "_predicate",
             ":" + name + "_migrate",
-        ] + default_deps + [":" + name + "_" + entity for entity in entities],
+        ] + default_deps + extra_deps + [":" + name + "_" + entity for entity in entities],
     )
     for libname, deps in libdeps.items():
         _ent_library(
