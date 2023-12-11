@@ -16,6 +16,24 @@ EntGenerateInfo = provider(
 def _ent_generate_impl(ctx):
     go = go_context(ctx)
 
+    # We create these
+    gomod_file = ctx.actions.declare_file("go.mod.tmp")
+    gosum_file = ctx.actions.declare_file("go.sum.tmp")
+
+    ctx.actions.run_shell(
+        inputs = [ctx.file.gomod],
+        outputs = [gomod_file],
+        progress_message = "Copying go.mod from %s to %s" % (ctx.file.gomod.short_path, gomod_file.short_path),
+        command = "cp %s %s" % (ctx.file.gomod.path, gomod_file.path),
+    )
+
+    ctx.actions.run_shell(
+        inputs = [ctx.file.gosum],
+        outputs = [gosum_file],
+        progress_message = "Copying go.sum from %s to %s" % (ctx.file.gosum.short_path, gosum_file.short_path),
+        command = "cp %s %s" % (ctx.file.gosum.path, gosum_file.path),
+    )
+
     # TODO: Discuss single-file output with Ent maintainers.
 
     files = []
@@ -65,25 +83,38 @@ def _ent_generate_impl(ctx):
     target_path = outputs[0].dirname  # TODO: better/cleaner way?
     target_package = ctx.attr.importpath
 
+    inputs_depset = depset([gomod_file, gosum_file] + ctx.files.data + schema_srcs)
+
     ctx.actions.run_shell(
         mnemonic = "EntGenerate",
         progress_message = "Generating Ent files in {dir}".format(dir = target_path),
         command = """
         set -eu
 
+        cp "$5" go.mod
+        cp "$6" go.sum
+        chmod 777 go.mod go.sum
+
         export PATH="$(pwd)/{gobin}:$PATH"
         export GOCACHE="$(pwd)/.gocache"
         export GOPATH="$(pwd)/.gopath"
 
-        exec {generate} "$@"
+        exec {generate} "$1" "$2" "$3" "$4"
         """.format(
             gobin = go.go.dirname,
             generate = ctx.executable.generate_tool.path,
         ),
-        arguments = [schema_path, schema_package, target_path, target_package],
+        arguments = [
+            schema_path,
+            schema_package,
+            target_path,
+            target_package,
+            gomod_file.path,
+            gosum_file.path,
+        ],
         # TODO: check rules_go again what tools are really needed here.
         tools = [ctx.executable.generate_tool] + go.sdk_tools + go.sdk_files,
-        inputs = depset(ctx.files.gomod + ctx.files.data + schema_srcs),
+        inputs = inputs_depset,
         outputs = outputs,
         env = {"GOROOT_FINAL": "GOROOT"},
     )
@@ -131,7 +162,16 @@ _ent_generate = rule(
                 "@io_entgo_ent//schema/field:go_default_library",
             ],
         ),
-        "gomod": attr.label(),
+        "gomod": attr.label(
+            default = Label("@//:go.mod"),
+            doc = "The go.mod file at the root of the repo",
+            allow_single_file = [".mod"],
+        ),
+        "gosum": attr.label(
+            default = Label("@//:go.sum"),
+            doc = "The go.sum file at the root of the repo",
+            allow_single_file = [".sum"],
+        ),
         # TODO: remove this.
         "entities": attr.string_list(mandatory = True),
         "extra_outputs": attr.string_list(),
@@ -184,15 +224,12 @@ _ent_library = rule(
 
 def go_ent_library(
         name,
-        gomod,
         entities,
         schema,
         visibility,
         importpath,
-        data = [],
         extra_deps = [],
-        extra_outputs = [],
-        generate_tool = "@com_github_cloneable_rules_ent//cmd/generate"):
+        **kwargs):
     # TODO: handle potential name conflicts.
     go_path(
         name = name + "_gopath",
@@ -202,12 +239,10 @@ def go_ent_library(
         name = name + "_generate",
         entities = entities,
         schema = schema,
-        gomod = gomod,
         importpath = importpath,
         gopath = ":" + name + "_gopath",
-        data = data,
-        generate_tool = generate_tool,
-        extra_outputs = extra_outputs,
+        visibility = [":__subpackages__"],
+        **kwargs
     )
 
     default_deps = [
